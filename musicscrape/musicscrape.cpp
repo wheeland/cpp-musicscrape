@@ -21,6 +21,8 @@
 #include "musicscrape.hpp"
 #include "gumbo.h"
 #include "rapidjson/document.h"
+#include "rapidjson/stringbuffer.h"
+#include "rapidjson/writer.h"
 
 #include <array>
 #include <functional>
@@ -153,7 +155,7 @@ static void gumboForEach(const GumboVector &vec, const function<void(T*)> &funct
         functor(reinterpret_cast<T*>(vec.data[i]));
 }
 
-static void gumboPrintNode(GumboNode *node, string tabs = "")
+static void gumboPrintNode(GumboNode *node, const string &tabs = "")
 {
     if (node->type == GUMBO_NODE_ELEMENT) {
         string tag(node->v.element.original_tag.data, node->v.element.original_tag.length);
@@ -167,6 +169,121 @@ static void gumboPrintNode(GumboNode *node, string tabs = "")
         strReplace(text, "\t", "\\t");
         SCRAPE_LOG_NOLINE() << tabs << "\"" << text << "\"";
     }
+}
+
+static void jsonCollectToString(const rapidjson::Value &value, string &dst, const string &tabs = "")
+{
+    using namespace rapidjson;
+    const string nextTabs = tabs + "  ";
+
+    if (value.IsInt()) {
+        dst += std::to_string(value.GetInt());
+    }
+    else if (value.IsBool()) {
+        dst += value.GetBool() ? "true" : "false";
+    }
+    else if (value.IsNull()) {
+        dst += "null";
+    }
+    else if (value.IsDouble()) {
+        dst += std::to_string(value.GetDouble());
+    }
+    else if (value.IsString()) {
+        std::string str = value.GetString();
+        strReplace(str, "\n", "\\n");
+        strReplace(str, "\t", "\\t");
+        dst += "\"";
+        dst += str;
+        dst += "\"";
+    }
+    else if (value.IsArray()) {
+        Value::ConstArray array = value.GetArray();
+
+        if (array.Empty()) {
+            dst += "[]";
+        }
+        else {
+            dst += "[\n";
+            dst += nextTabs;
+            for (SizeType i = 0; i < array.Size(); ++i) {
+                jsonCollectToString(array[i], dst, nextTabs);
+                if (i < array.Size() - 1) {
+                    dst += ",\n";
+                    dst += nextTabs;
+                } else {
+                    dst += "\n";
+                    dst += tabs;
+                }
+            }
+            dst += "]";
+        }
+    }
+    else if (value.IsObject()) {
+        Value::ConstObject obj = value.GetObject();
+
+        if (obj.MemberCount() == 0) {
+            dst += "{}";
+        }
+        else {
+            dst += "{\n";
+            dst += nextTabs;
+            for (auto it = obj.MemberBegin(); it != obj.MemberEnd(); ++it) {
+                dst += it->name.GetString();
+                dst += ": ";
+                jsonCollectToString(it->value, dst, nextTabs);
+                if (it + 1 != obj.MemberEnd()) {
+                    dst += ",\n";
+                    dst += nextTabs;
+                } else {
+                    dst += "\n";
+                    dst += tabs;
+                }
+            }
+            dst += "}";
+        }
+    }
+}
+
+static void jsonPrint(const rapidjson::Value &value)
+{
+    string text;
+    jsonCollectToString(value, text, "");
+
+    size_t start = 0;
+
+    while (start != string::npos) {
+        const size_t end = text.find("\n", start);
+        SCRAPE_LOG_NOLINE() << text.substr(start, (end == string::npos) ? end : (end - start));
+        start = (end == string::npos) ? end : (end + 1);
+    }
+}
+
+static void jsonGatherMembers(vector<rapidjson::Document> &out, const rapidjson::Value &value, const string &memberName)
+{
+    if (value.IsObject()) {
+        rapidjson::Value::ConstObject obj = value.GetObject();
+        for (auto it = obj.MemberBegin(); it != obj.MemberEnd(); ++it) {
+            if (it->name.GetString() == memberName) {
+                out.push_back(rapidjson::Document());
+                out.back().CopyFrom(it->value, out.back().GetAllocator());
+            } else {
+                jsonGatherMembers(out, it->value, memberName);
+            }
+        }
+    }
+    else if (value.IsArray()) {
+        rapidjson::Value::ConstArray array = value.GetArray();
+        for (rapidjson::SizeType i = 0; i < array.Size(); ++i) {
+            jsonGatherMembers(out, array[i], memberName);
+        }
+    }
+}
+
+static vector<rapidjson::Document> jsonFindMembers(const rapidjson::Value &value, const string &memberName)
+{
+    vector<rapidjson::Document> ret;
+    jsonGatherMembers(ret, value, memberName);
+    return ret;
 }
 
 static bool gumboElementHasAttrs(const GumboVector &attrs, const string &name, const string &value)
