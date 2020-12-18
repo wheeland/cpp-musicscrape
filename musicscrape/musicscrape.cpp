@@ -23,6 +23,7 @@
 #include "rapidjson/document.h"
 #include "rapidjson/stringbuffer.h"
 #include "rapidjson/writer.h"
+#include "rapidjson/pointer.h"
 
 #include <array>
 #include <functional>
@@ -655,65 +656,55 @@ ResultList albumInfo(const std::string &html)
 
 namespace ScrapeYoutube {
 
-std::string searchUrl(const std::string &pattern)
+string searchUrl(const string &pattern)
 {
     return "https://www.youtube.com/results?search_query=" + percentEncode(pattern);
 }
 
-ResultList searchResult(const std::string &html)
+ResultList searchResult(const string &html)
 {
     GumboOutput* output = gumbo_parse(html.data());
 
     ResultList ret;
 
-    // get all div elements
-    const vector<GumboNode*> divElements = gumboFind(output->root, GUMBO_TAG_DIV, {}, true);
-    for (GumboNode *div : divElements) {
-        // we only care about <div class=".. yt-lockup-dismissable ..">
-        const string classAttr = gumboGetAttributeValue(div, "class");
-        if (classAttr.find("yt-lockup-dismissable") == string::npos)
+    // find <script> element with data
+    const vector<GumboNode*> scriptElements = gumboFind(output->root, GUMBO_TAG_SCRIPT, {}, true);
+    for (GumboNode *scriptElem : scriptElements) {
+        const char *scriptText = gumboFindFirstText(scriptElem);
+        if (!scriptText)
             continue;
 
-        GumboNode* contentNode = gumboFindFirst(div, GUMBO_TAG_DIV, {{"class", "yt-lockup-content"}});
-        if (!contentNode) {
-            ScrapeLogger() << "No <div class='yt-lockup-content'> element in yt-lockup-dismissable div";
+        const string text(scriptText);
+        const char *needle = "var ytInitialData = ";
+        const size_t pos = text.find(needle);
+        if (pos == string::npos)
             continue;
-        }
 
-        GumboNode* imgNode = gumboFindFirst(div, GUMBO_TAG_IMG);
-        if (!imgNode) {
-            ScrapeLogger() << "No <img> element in yt-lockup-dismissable div";
-            continue;
-        }
+        const string jsonStr = text.substr(pos + strlen(needle));
 
-        GumboNode* link = gumboFindFirst(contentNode, GUMBO_TAG_A, {{"href", ""}, {"title", ""}});
-        if (!link) {
-            ScrapeLogger() << "No <a href='...' title='...'> element in yt-lockup-content item";
+        rapidjson::Document json;
+        json.Parse<rapidjson::kParseStopWhenDoneFlag>(jsonStr.data());
+        if (json.HasParseError()) {
+            SCRAPE_LOG() << "Error while parsing Trackinfo JSON: "
+                         << json.GetParseError() <<" (line " << json.GetErrorOffset() << ")";
             continue;
         }
 
-        const string href = gumboGetAttributeValue(link, "href");
-        const string title = gumboGetAttributeValue(link, "title");
-        const string thumbnailSrc = gumboGetAttributeValue(imgNode, "src");
-        const string thumbnailDataThumb = gumboGetAttributeValue(imgNode, "data-thumb");
-
-        const string prefix = "/watch?v=";
-        const size_t prefixPos = href.find(prefix);
-        if (prefixPos == string::npos)
-            continue;
-
-        const string videoId = strSplit(href.substr(prefixPos + prefix.size()), "&").front();
-
-        Result result;
-        result.url = "https://www.youtube.com" + prefix + videoId;
-        result.title = title;
-        result.thumbnailUrl = thumbnailDataThumb.empty() ? thumbnailSrc : thumbnailDataThumb;
-
-        const vector<string> bylist = strSplit(href, "&list=");
-        if (bylist.size() > 1)
-            result.playlist = strSplit(bylist[1], "&").front();
-
-        ret.push_back(result);
+        const vector<rapidjson::Document> videos = jsonFindMembers(json, "videoRenderer");
+        for (const rapidjson::Document &video : videos) {
+            const rapidjson::Value* id = rapidjson::Pointer("/videoId").Get(video);
+            const rapidjson::Value* title = rapidjson::Pointer("/title/runs/0/text").Get(video);
+            const rapidjson::Value* thumbnail = rapidjson::Pointer("/thumbnail/thumbnails/0/url").Get(video);
+            if (id && id->IsString()
+                    && title && title->IsString()
+                    && thumbnail && thumbnail->IsString()) {
+                std::string prefix = "https://www.youtube.com/watch?v=";
+                ret.push_back(Result{title->GetString(), prefix + id->GetString(), thumbnail->GetString(), ""});
+            }
+            else {
+                SCRAPE_LOG() << "videoRenderer JSON element malformed";
+            }
+        }
     }
 
     gumbo_destroy_output(&kGumboDefaultOptions, output);
