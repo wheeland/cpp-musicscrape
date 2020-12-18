@@ -37,7 +37,7 @@ using std::string;
 using std::vector;
 using std::function;
 
-bool MUSIC_SCRAPE_LOG_ERRORS = true;
+bool MUSIC_SCRAPE_LOG_ERRORS = false;
 
 struct ScrapeLogger {
     ScrapeLogger() {}
