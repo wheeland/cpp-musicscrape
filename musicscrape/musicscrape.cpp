@@ -27,6 +27,7 @@
 
 #include <array>
 #include <functional>
+#include <algorithm>
 #include <numeric>
 #include <iostream>
 #include <cstring>
@@ -147,6 +148,12 @@ string strJoin(const vector<string> &v, const string &joinString)
         ret += v[i];
     }
     return ret;
+}
+
+template <class T, class Cond>
+static void removeIf(std::vector<T> &vec, const Cond &cond)
+{
+    vec.erase(std::remove_if(vec.begin(), vec.end(), cond), vec.end());
 }
 
 template <class T>
@@ -484,10 +491,10 @@ static ResultList albumInfo(const std::string &html, GumboNode *root)
     RETURN_IF(!titleNode, "No <h2 class='trackTitle'> node");
     const char *title = gumboFindFirstText(titleNode);
     RETURN_IF(!title, "No text in <h2 class='trackTitle'> node");
-    GumboNode *artistNode = gumboFindFirst(bandNode, GUMBO_TAG_SPAN, {{"itemprop", "byArtist"}});
-    RETURN_IF(!artistNode, "No <span itemprop='byArtist'> node");
+    GumboNode *artistNode = gumboFindFirst(bandNode, GUMBO_TAG_A);
+    RETURN_IF(!artistNode, "No artist <a> node");
     const char *artist = gumboFindFirstText(artistNode);
-    RETURN_IF(!artist, "No text in <span itemprop='byArtist'> node");
+    RETURN_IF(!artist, "No artist <a> node text");
 
     // get album art
     GumboNode *albumArtNode = gumboFindFirst(root, GUMBO_TAG_DIV, {{"id", "tralbumArt"}});
@@ -497,21 +504,19 @@ static ResultList albumInfo(const std::string &html, GumboNode *root)
     const string albumArtSrc = gumboGetAttributeValue(albumArtImg, "src");
     RETURN_IF(albumArtSrc.empty(), "Empty <img> in <div id='tralbumArt'> node");
 
-    // Extract JS trackinfo object from HTML
-    const char *trackinfoHeader = "trackinfo: [{";
-    const size_t trackinfoPos = html.find(trackinfoHeader);
-    RETURN_IF(trackinfoPos == string::npos, "No trackinfo JSON found");
+    // Look for tralbum JSON
+    vector<GumboNode*> scriptElems = gumboFind(root, GUMBO_TAG_SCRIPT);
+    removeIf(scriptElems, [](GumboNode *node) {
+        return gumboGetAttributeValue(node, "data-tralbum").empty();
+    });
+    RETURN_IF(scriptElems.size() != 1, "Could'nt find tralbum script element");
 
-    const size_t trackinfoStartJson = trackinfoPos + strlen(trackinfoHeader) - 2;
-    const size_t trackinfoEndJson = html.find("}],", trackinfoStartJson);
-    RETURN_IF(trackinfoEndJson == string::npos, "No trackinfo JSON found");
-
-    // parse JSON from trackinfo object
-    const string trackinfoList = html.substr(trackinfoStartJson, trackinfoEndJson + 2 - trackinfoStartJson);
-    const string tracksJsonStr = string("{ \"trackinfo\": ") + trackinfoList + " }";
+    // Parse JSON
+    const string tracksJsonStr = gumboGetAttributeValue(scriptElems[0], "data-tralbum");
     rapidjson::Document tracksJson;
     tracksJson.Parse(tracksJsonStr.data());
     RETURN_IF(tracksJson.HasParseError(), "Error while parsing Trackinfo JSON");
+    RETURN_IF(!tracksJson.HasMember("trackinfo"), "Malformed tralbum data");
 
     // gather album info from parsed JSON
     const rapidjson::Value &tracks = tracksJson["trackinfo"];
@@ -526,6 +531,8 @@ static ResultList albumInfo(const std::string &html, GumboNode *root)
 
         const auto streamingIt = track.FindMember("streaming");
         CONTINUE_IF(streamingIt == track.MemberEnd(), "trackinfo JSON: streaming attr missing");
+        if (streamingIt->value.IsNull())
+            continue;
         CONTINUE_IF(!streamingIt->value.IsNumber(), "trackinfo JSON: streaming attr not a number");
         const int streaming = streamingIt->value.GetInt();
         if (streaming == 0)
